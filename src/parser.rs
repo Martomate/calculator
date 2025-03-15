@@ -29,7 +29,7 @@ impl<'s> Parser<'s> {
             .map(|f| (f, Parser(&self.0[s.len()..])))
     }
 
-    fn term(&self) -> Option<(Operand, Self)> {
+    fn term(&self) -> Option<(Expr, Self)> {
         if let Some((c, p)) = self.next() {
             match c {
                 '(' => {
@@ -44,14 +44,16 @@ impl<'s> Parser<'s> {
         }
     }
 
-    fn expr(&self) -> Result<(Operand, Self), String> {
+    fn expr(&self) -> Result<(Expr, Self), String> {
         let p = self;
         let p = p.spaces();
         let (a, p) = p.term().ok_or("invalid term")?;
-        let p = p.spaces();
-        if let Ok((op, b, p)) = Ok::<_, String>(()).and_then(|_| {
+        let mut p = p.spaces();
+
+        let mut ops = Vec::new();
+        while let Ok((op, b, _p)) = Ok::<_, String>(()).and_then(|_| {
+            let p = p.spaces();
             let (op, p) = p.next().ok_or("invalid operator")?;
-            let (b, p) = p.expr()?;
             let op = match op {
                 '+' => Operator::Add,
                 '-' => Operator::Sub,
@@ -59,21 +61,32 @@ impl<'s> Parser<'s> {
                 '/' => Operator::Div,
                 _ => return Err(format!("unsupported operator: {}", op))?,
             };
+            let p = p.spaces();
+            let (b, p) = p.term().ok_or("invalid term")?;
             Ok((op, b, p))
         }) {
-            let node = match op {
-                Operator::Add | Operator::Sub | Operator::Mul | Operator::Div => {
-                    Node::new(op, [a, b])
-                }
-            };
-            Ok((node.into(), p))
-        } else {
+            p = _p;
+            ops.push((op, b));
+        }
+
+        if ops.is_empty() {
             Ok((a, p))
+        } else {
+            let mut e = a;
+            for (op, b) in ops {
+                let node = match op {
+                    Operator::Add | Operator::Sub | Operator::Mul | Operator::Div => {
+                        Operation::new(op, [e, b])
+                    }
+                };
+                e = Expr::Op(node);
+            }
+            Ok((e, p))
         }
     }
 }
 
-pub fn parse_line(line: &str) -> Result<Operand, String> {
+pub fn parse_line(line: &str) -> Result<Expr, String> {
     let (res, p) = Parser(line).expr()?;
     let p = p.spaces();
     if !p.0.is_empty() {
@@ -130,7 +143,7 @@ mod tests {
             for (input, (a, b)) in [("1+2", (1.0, 2.0)), ("1 + 2", (1.0, 2.0))] {
                 assert_eq!(
                     parse_line(input).unwrap(),
-                    Node::new(Operator::Add, [a.into(), b.into()]).into(),
+                    Operation::new(Operator::Add, [a.into(), b.into()]).into(),
                     "failed to parse {input:?}"
                 );
             }
@@ -146,7 +159,7 @@ mod tests {
             ] {
                 assert_eq!(
                     parse_line(input),
-                    Ok(Node::new(Operator::Add, [a.into(), b.into()]).into()),
+                    Ok(Operation::new(Operator::Add, [a.into(), b.into()]).into()),
                     "failed to parse {input:?}"
                 );
             }
@@ -157,11 +170,11 @@ mod tests {
             for (input, (a, b, c)) in [("1+2+3", (1.0, 2.0, 3.0)), ("1 + 2 + 3", (1.0, 2.0, 3.0))] {
                 assert_eq!(
                     parse_line(input),
-                    Ok(Node::new(
+                    Ok(Operation::new(
                         Operator::Add,
                         [
-                            a.into(),
-                            Node::new(Operator::Add, [b.into(), c.into()]).into()
+                            Operation::new(Operator::Add, [a.into(), b.into()]).into(),
+                            c.into(),
                         ]
                     )
                     .into()),
@@ -171,13 +184,31 @@ mod tests {
         }
 
         #[test]
+        fn add_4() {
+            for (input, (a, b, c, d)) in [
+                ("1+2+3+4", (1.0, 2.0, 3.0, 4.0)),
+                ("1 + 2 + 3 + 4", (1.0, 2.0, 3.0, 4.0)),
+            ] {
+                // a + b + c + d = (((a + b) + c) + d)
+                let _a = a.into();
+                let _b = b.into();
+                let _c = c.into();
+                let _d = d.into();
+                let _ab = Operation::new(Operator::Add, [_a, _b]).into();
+                let _abc = Operation::new(Operator::Add, [_ab, _c]).into();
+                let _abcd = Operation::new(Operator::Add, [_abc, _d]).into();
+                assert_eq!(parse_line(input), Ok(_abcd), "failed to parse {input:?}");
+            }
+        }
+
+        #[test]
         fn add_3_paren() {
             assert_eq!(
                 parse_line("(1+2)+3"),
-                Ok(Node::new(
+                Ok(Operation::new(
                     Operator::Add,
                     [
-                        Node::new(Operator::Add, [1.0.into(), 2.0.into()]).into(),
+                        Operation::new(Operator::Add, [1.0.into(), 2.0.into()]).into(),
                         3.0.into(),
                     ]
                 )
@@ -187,16 +218,46 @@ mod tests {
             );
             assert_eq!(
                 parse_line("1+(2+3)"),
-                Ok(Node::new(
+                Ok(Operation::new(
                     Operator::Add,
                     [
                         1.0.into(),
-                        Node::new(Operator::Add, [2.0.into(), 3.0.into()]).into()
+                        Operation::new(Operator::Add, [2.0.into(), 3.0.into()]).into()
                     ]
                 )
                 .into()),
                 "failed to parse {:?}",
                 "1+(2+3)"
+            );
+        }
+
+        #[test]
+        fn add_mul_order() {
+            assert_eq!(
+                parse_line("1*2+3"),
+                Ok(Operation::new(
+                    Operator::Add,
+                    [
+                        Operation::new(Operator::Mul, [1.0.into(), 2.0.into()]).into(),
+                        3.0.into(),
+                    ]
+                )
+                .into()),
+                "failed to parse {:?}",
+                "1*2+3"
+            );
+            assert_eq!(
+                parse_line("1+2*3"),
+                Ok(Operation::new(
+                    Operator::Add,
+                    [
+                        1.0.into(),
+                        Operation::new(Operator::Mul, [2.0.into(), 3.0.into()]).into(),
+                    ]
+                )
+                .into()),
+                "failed to parse {:?}",
+                "1+2*3"
             );
         }
     }
