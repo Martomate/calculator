@@ -72,16 +72,19 @@ impl<'s> Parser<'s> {
         if ops.is_empty() {
             Ok((a, p))
         } else {
-            let mut e = a;
-            for (op, b) in ops {
-                let node = match op {
-                    Operator::Add | Operator::Sub | Operator::Mul | Operator::Div => {
-                        Operation::new(op, [e, b])
-                    }
-                };
-                e = Expr::Op(node);
+            let mut a = a;
+            while !ops.is_empty() {
+                let current_precedence = ops.iter().map(|o| o.0.precedence()).min().unwrap();
+                let idx = ops.iter().position(|o| o.0.precedence() == current_precedence).unwrap();
+                let (op, b) = ops[idx].clone();
+                if idx == 0 {
+                    a = Operation::new(op, [a, b]).into();
+                } else {
+                    ops[idx-1].1 = Operation::new(op, [ops[idx-1].1.clone(), b]).into();
+                }
+                ops.remove(idx);
             }
-            Ok((e, p))
+            Ok((a, p))
         }
     }
 }

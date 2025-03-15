@@ -34,6 +34,18 @@ pub enum Operator {
     Div,
 }
 
+impl Operator {
+    /// lower value means operator is applied sooner
+    pub fn precedence(self) -> u8 {
+        match self {
+            Operator::Add => 2,
+            Operator::Sub => 2,
+            Operator::Mul => 1,
+            Operator::Div => 1,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Operation {
     op: Operator,
