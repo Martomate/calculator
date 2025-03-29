@@ -5,15 +5,18 @@ use std::sync::LazyLock;
 #[derive(Clone)]
 struct Parser<'s>(&'s str);
 
-impl<'s> Parser<'s> {
+impl Parser<'_> {
+    #[must_use]
     fn consume(&self, p: char) -> Option<Self> {
         self.0.strip_prefix(p).map(Parser)
     }
 
+    #[must_use]
     fn next(&self) -> Option<(char, Self)> {
         self.0.chars().next().map(|c| (c, Parser(&self.0[1..])))
     }
 
+    #[must_use]
     fn spaces(&self) -> Self {
         match self.consume(' ') {
             Some(p) => p.spaces(),
@@ -21,6 +24,7 @@ impl<'s> Parser<'s> {
         }
     }
 
+    #[must_use]
     fn float(&self) -> Option<(f64, Self)> {
         static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^-?\d+(\.\d+)?").unwrap());
         let s = &RE.captures(self.0)?.get(0)?.as_str();
@@ -29,11 +33,12 @@ impl<'s> Parser<'s> {
             .map(|f| (f, Parser(&self.0[s.len()..])))
     }
 
+    #[must_use]
     fn term(&self) -> Option<(Expr, Self)> {
         if let Some((c, p)) = self.next() {
             match c {
                 '(' => {
-                    let (e, p) = p.expr().ok()?;
+                    let (e, p) = p.expr(100).ok()?;
                     let p = p.consume(')')?;
                     Some((e, p))
                 }
@@ -44,53 +49,38 @@ impl<'s> Parser<'s> {
         }
     }
 
-    fn expr(&self) -> Result<(Expr, Self), String> {
-        let p = self;
-        let p = p.spaces();
-        let (a, p) = p.term().ok_or("invalid term")?;
-        let mut p = p.spaces();
+    fn expr(&self, max_precedence: u8) -> Result<(Expr, Self), String> {
+        let (mut a, mut p) = self.spaces().term().ok_or_else(|| format!("invalid term: {:?}", self.0))?;
 
-        let mut ops = Vec::new();
-        while let Ok((op, b, _p)) = Ok::<_, String>(()).and_then(|_| {
-            let p = p.spaces();
-            let (op, p) = p.next().ok_or("invalid operator")?;
+        loop {
+            p = p.spaces();
+            if p.0.is_empty() {
+                break;
+            }
+            let (op, _p) = p.next().ok_or_else(|| format!("invalid operator: {:?}", p.0))?;
             let op = match op {
                 '+' => Operator::Add,
                 '-' => Operator::Sub,
                 '*' => Operator::Mul,
                 '/' => Operator::Div,
-                _ => return Err(format!("unsupported operator: {}", op))?,
+                _ => break,
             };
-            let p = p.spaces();
-            let (b, p) = p.term().ok_or("invalid term")?;
-            Ok((op, b, p))
-        }) {
+            if op.precedence() >= max_precedence {
+                break
+            }
+            p = _p.spaces();
+            let (b, _p) = p.expr(op.precedence())?;
             p = _p;
-            ops.push((op, b));
+
+            a = Operation::new(op, [a, b]).into();
         }
 
-        if ops.is_empty() {
-            Ok((a, p))
-        } else {
-            let mut a = a;
-            while !ops.is_empty() {
-                let current_precedence = ops.iter().map(|o| o.0.precedence()).min().unwrap();
-                let idx = ops.iter().position(|o| o.0.precedence() == current_precedence).unwrap();
-                let (op, b) = ops[idx].clone();
-                if idx == 0 {
-                    a = Operation::new(op, [a, b]).into();
-                } else {
-                    ops[idx-1].1 = Operation::new(op, [ops[idx-1].1.clone(), b]).into();
-                }
-                ops.remove(idx);
-            }
-            Ok((a, p))
-        }
+        Ok((a, p))
     }
 }
 
 pub fn parse_line(line: &str) -> Result<Expr, String> {
-    let (res, p) = Parser(line).expr()?;
+    let (res, p) = Parser(line).expr(100)?;
     let p = p.spaces();
     if !p.0.is_empty() {
         Err(format!(

@@ -68,7 +68,7 @@ mod tests {
             // error message (with color)
             &[
                 ansi::FG_RED,
-                r#"could not parse the end of the imput, namely: "+ *""#,
+                r#"invalid term: "*""#,
                 ansi::RESET,
                 "\n",
             ]
