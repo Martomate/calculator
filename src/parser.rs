@@ -5,83 +5,99 @@ use std::sync::LazyLock;
 #[derive(Clone)]
 struct Parser<'s>(&'s str);
 
-impl Parser<'_> {
-    #[must_use]
-    fn consume(&self, p: char) -> Option<Self> {
-        self.0.strip_prefix(p).map(Parser)
-    }
-
-    #[must_use]
-    fn next(&self) -> Option<(char, Self)> {
-        self.0.chars().next().map(|c| (c, Parser(&self.0[1..])))
-    }
-
-    #[must_use]
-    fn spaces(&self) -> Self {
-        match self.consume(' ') {
-            Some(p) => p.spaces(),
-            None => self.clone(),
+impl<'s> Parser<'s> {
+    fn attempt<T>(&mut self, f: impl FnOnce(&mut Parser<'s>) -> Option<T>) -> Option<T> {
+        let mut p = self.clone();
+        let res = f(&mut p);
+        if res.is_some() {
+            *self = p;
         }
+        res
     }
 
-    #[must_use]
-    fn float(&self) -> Option<(f64, Self)> {
-        static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^-?\d+(\.\d+)?").unwrap());
-        let s = &RE.captures(self.0)?.get(0)?.as_str();
-        s.parse::<f64>()
-            .ok()
-            .map(|f| (f, Parser(&self.0[s.len()..])))
-    }
-
-    #[must_use]
-    fn term(&self) -> Option<(Expr, Self)> {
-        if let Some((c, p)) = self.next() {
-            match c {
-                '(' => {
-                    let (e, p) = p.expr(100).ok()?;
-                    let p = p.consume(')')?;
-                    Some((e, p))
-                }
-                _ => self.float().map(|(f, p)| (f.into(), p)),
-            }
+    fn consume(&mut self, p: char) -> Option<()> {
+        if let Some(rest) = self.0.strip_prefix(p) {
+            self.0 = rest;
+            Some(())
         } else {
             None
         }
     }
 
-    fn expr(&self, max_precedence: u8) -> Result<(Expr, Self), String> {
-        let (mut a, mut p) = self.spaces().term().ok_or_else(|| format!("invalid term: {:?}", self.0))?;
+    fn next(&mut self) -> Option<char> {
+        let c = self.0.chars().next();
+        if c.is_some() {
+            self.0 = &self.0[1..];
+        }
+        c
+    }
+
+    fn spaces(&mut self) {
+        while self.consume(' ').is_some() {}
+    }
+
+    fn float(&mut self) -> Option<f64> {
+        static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^-?\d+(\.\d+)?").unwrap());
+        let s = &RE.captures(self.0)?.get(0)?.as_str();
+        let f = s.parse::<f64>().ok();
+        if f.is_some() {
+            self.0 = &self.0[s.len()..];
+        }
+        f
+    }
+
+    fn term(&mut self) -> Option<Expr> {
+        match self.clone().next()? {
+            '(' => {
+                self.consume('(')?;
+                let e = self.expr(100).ok()?;
+                self.consume(')')?;
+                Some(e)
+            }
+            _ => {
+                self.float().map(|f| f.into())
+            },
+        }
+    }
+
+    fn expr(&mut self, max_precedence: u8) -> Result<Expr, String> {
+        self.spaces();
+        let mut a = self.term().ok_or_else(|| format!("invalid term: {:?}", self.0))?;
 
         loop {
-            p = p.spaces();
-            if p.0.is_empty() {
+            self.spaces();
+            if self.0.is_empty() {
                 break;
             }
-            let (op, _p) = p.next().ok_or_else(|| format!("invalid operator: {:?}", p.0))?;
-            let op = match op {
-                '+' => Operator::Add,
-                '-' => Operator::Sub,
-                '*' => Operator::Mul,
-                '/' => Operator::Div,
-                _ => break,
+            let Some(op) = self.attempt(|p| {
+                let op = match p.next()? {
+                    '+' => Operator::Add,
+                    '-' => Operator::Sub,
+                    '*' => Operator::Mul,
+                    '/' => Operator::Div,
+                    _ => return None,
+                };
+                if op.precedence() >= max_precedence {
+                    return None;
+                }
+                Some(op)
+            }) else {
+                break;
             };
-            if op.precedence() >= max_precedence {
-                break
-            }
-            p = _p.spaces();
-            let (b, _p) = p.expr(op.precedence())?;
-            p = _p;
+            self.spaces();
+            let b = self.expr(op.precedence())?;
 
             a = Operation::new(op, [a, b]).into();
         }
 
-        Ok((a, p))
+        Ok(a)
     }
 }
 
 pub fn parse_line(line: &str) -> Result<Expr, String> {
-    let (res, p) = Parser(line).expr(100)?;
-    let p = p.spaces();
+    let mut p = Parser(line);
+    let res = p.expr(100)?;
+    p.spaces();
     if !p.0.is_empty() {
         Err(format!(
             "could not parse the end of the imput, namely: {:?}",
@@ -103,7 +119,9 @@ mod tests {
             (" abc", "abc"),
             ("  abc", "abc"), //
         ] {
-            assert_eq!(Parser(input).spaces().0, output, "input was {input:?}",);
+            let mut p = Parser(input);
+            p.spaces();
+            assert_eq!(p.0, output, "input was {input:?}",);
         }
     }
 
@@ -119,9 +137,11 @@ mod tests {
             ("-1.abc", Some((-1.0, ".abc"))),
             ("+1.2", None),
         ] {
-            let res = Parser(input).float().map(|(a, p)| (a, p.0));
+            let mut p = Parser(input);
+
+            let res = p.float();
             if let Some((output, rest)) = expected {
-                assert_eq!(res, Some((output, rest)), "parsing failed for {input:?}");
+                assert_eq!((res, p.0), (Some(output), rest), "parsing failed for {input:?}");
             } else {
                 assert_eq!(res, None, "parsing did not fail for {input:?}");
             }
@@ -135,8 +155,8 @@ mod tests {
         fn add_2() {
             for (input, (a, b)) in [("1+2", (1.0, 2.0)), ("1 + 2", (1.0, 2.0))] {
                 assert_eq!(
-                    parse_line(input).unwrap(),
-                    Operation::new(Operator::Add, [a.into(), b.into()]).into(),
+                    parse_line(input),
+                    Ok(Operation::new(Operator::Add, [a.into(), b.into()]).into()),
                     "failed to parse {input:?}"
                 );
             }
